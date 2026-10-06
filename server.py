@@ -131,6 +131,7 @@ class BFYPRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Handle GET requests."""
+        print(f"[BFYP] GET request received: {self.path}")
 
         # ----------------------------------------------------
         # Health check
