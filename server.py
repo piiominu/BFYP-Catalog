@@ -148,7 +148,7 @@ class BFYPRequestHandler(BaseHTTPRequestHandler):
         # Catalog endpoint
         # ----------------------------------------------------
 
-        if self.path == "/catalog.json" or self.path == "/catalog":
+        if self.path.rstrip("/") in ("/catalog.json", "/catalog"):
             catalog = load_catalog()
 
             if catalog is None:
