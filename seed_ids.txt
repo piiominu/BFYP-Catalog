@@ -1,1 +1,14 @@
 
+# Games the crawler should look up. One per line. Lines starting with # are ignored.
+#
+#   123456       -> a Universe ID
+#   p:123456     -> a Place ID (the number in a game's web address; the crawler converts it)
+#
+# These are just examples to prove the crawler works. If an ID is wrong or the game is
+# private, the crawler prints a message and skips it.
+
+383310974
+994732206
+3317771874
+2440500124
+p:920587237
