@@ -1,4 +1,3 @@
-
 # Games the crawler should look up. One per line. Lines starting with # are ignored.
 #
 #   123456       -> a Universe ID
