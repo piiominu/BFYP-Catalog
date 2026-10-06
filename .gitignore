@@ -1,1 +1,10 @@
+# The crawler's output. It's generated, so we don't commit it.
+catalog.json
 
+# Python junk
+__pycache__/
+*.pyc
+
+# Secrets. We don't use any yet, but never commit them when we do.
+.env
+*.key
