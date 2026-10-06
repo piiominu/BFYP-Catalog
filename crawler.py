@@ -1,4 +1,3 @@
-
 """
 BFYP Catalog Crawler - STEP 1
 
