@@ -29,6 +29,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from classify import classify, load_rules
+
+RULES = load_rules()
 from datetime import datetime, timezone
 from pathlib import Path
 
