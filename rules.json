@@ -1,0 +1,19 @@
+{
+  "brainrot_keywords": [
+    "brainrot", "skibidi", "tralalero", "tung tung", "sahur", "lirili",
+    "bombardiro", "cappuccino assassino", "italian brainrot", "rizz", "gyatt"
+  ],
+  "slop_name_prefixes": [
+    "grow a ", "grow an ", "steal a ", "steal an ", "sell a ", "sell an ",
+    "plant a ", "feed a ", "raise a "
+  ],
+  "force_slop_universe_ids": [],
+  "never_slop_universe_ids": [],
+  "hidden_gem": {
+    "min_votes": 150,
+    "min_like_ratio": 0.90,
+    "min_playing": 5,
+    "max_playing": 3000,
+    "max_days_since_update": 365
+  }
+}
