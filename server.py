@@ -1,14 +1,16 @@
+import base64
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
-
 
 # ============================================================
 # BFYP CATALOG SERVER
@@ -32,6 +34,39 @@ REFRESH_INTERVAL = 30 * 60
 # Your crawler can discover hundreds/thousands of games.
 CRAWLER_TIMEOUT = 60 * 60
 
+# ============================================================
+# GITHUB PUBLISHING
+# ============================================================
+# After each successful crawl, catalog.json is committed to GitHub so
+# raw.githubusercontent.com (BFYP's backup source) always has a recent copy.
+#
+# Set these in Render -> your service -> Environment:
+#   GITHUB_TOKEN   (required) fine-grained token with "Contents: Read and write"
+#                  on piiominu/BFYP-Catalog only
+#   GITHUB_REPO    (optional) defaults to piiominu/BFYP-Catalog
+#   GITHUB_BRANCH  (optional) defaults to main
+#
+# If GITHUB_TOKEN is missing, publishing is skipped and everything else works as before.
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "piiominu/BFYP-Catalog").strip()
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main").strip()
+GITHUB_PATH = "catalog.json"
+
+# Commit when the list of games changes, or at least this often (to refresh player counts etc.).
+# Committing a ~1 MB file every 30 minutes would grow the repo by ~50 MB a day.
+GITHUB_MIN_PUSH_INTERVAL = 6 * 60 * 60
+
+github_status = {
+    "enabled": bool(GITHUB_TOKEN),
+    "last_push": None,
+    "last_push_success": None,
+    "last_push_error": None,
+    "last_skipped_reason": None,
+}
+
+_last_pushed_ids = None
+_last_pushed_time = 0.0
 
 # ============================================================
 # CRAWLER STATUS
@@ -45,7 +80,6 @@ crawler_status = {
     "last_error": None,
 }
 
-
 # ============================================================
 # TIME HELPERS
 # ============================================================
@@ -53,7 +87,6 @@ crawler_status = {
 def utc_now():
     """Return the current UTC time as an ISO timestamp."""
     return datetime.now(timezone.utc).isoformat()
-
 
 # ============================================================
 # CATALOG HELPERS
@@ -75,7 +108,6 @@ def load_catalog():
             flush=True
         )
         return None
-
 
 def get_catalog_info():
     """Return useful information about the current catalog."""
@@ -113,6 +145,110 @@ def get_catalog_info():
         "generated_at": generated_at,
     }
 
+# ============================================================
+# GITHUB PUBLISHING
+# ============================================================
+
+def github_request(method, url, payload=None):
+    """Call the GitHub REST API. Returns (status_code, parsed_json_or_None)."""
+
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("Authorization", f"Bearer {GITHUB_TOKEN}")
+    request.add_header("Accept", "application/vnd.github+json")
+    request.add_header("X-GitHub-Api-Version", "2022-11-28")
+    request.add_header("User-Agent", "BFYP-Catalog-Server")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read()
+            return response.status, (json.loads(body) if body else None)
+
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read() or b"null")
+        except Exception:
+            body = None
+        return e.code, body
+
+def publish_catalog_to_github():
+    """Commit catalog.json to GitHub if the game list changed (or it's been a while)."""
+
+    global _last_pushed_ids, _last_pushed_time
+
+    if not GITHUB_TOKEN:
+        github_status["last_skipped_reason"] = "GITHUB_TOKEN is not set"
+        return
+
+    catalog = load_catalog()
+    if not isinstance(catalog, dict) or not isinstance(catalog.get("Games"), list) or not catalog["Games"]:
+        github_status["last_skipped_reason"] = "catalog.json is missing or empty"
+        return
+
+    ids = frozenset(
+        g.get("UniverseId") for g in catalog["Games"] if isinstance(g, dict)
+    )
+    now = time.time()
+    if (
+        _last_pushed_ids is not None
+        and ids == _last_pushed_ids
+        and now - _last_pushed_time < GITHUB_MIN_PUSH_INTERVAL
+    ):
+        github_status["last_skipped_reason"] = "game list unchanged since last push"
+        return
+
+    api_url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_PATH}"
+
+    try:
+        # The file's current sha is required to update it
+        status_code, current = github_request("GET", f"{api_url}?ref={GITHUB_BRANCH}")
+        sha = None
+        if status_code == 200 and isinstance(current, dict):
+            sha = current.get("sha")
+        elif status_code != 404:
+            raise RuntimeError(f"GitHub GET returned {status_code}: {current}")
+
+        content = CATALOG_FILE.read_bytes()
+        payload = {
+            "message": (
+                f"Catalog update: {len(catalog['Games'])} games "
+                f"(GeneratedAt {catalog.get('GeneratedAt')})"
+            ),
+            "content": base64.b64encode(content).decode("ascii"),
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        status_code, result = github_request("PUT", api_url, payload)
+        if status_code not in (200, 201):
+            raise RuntimeError(f"GitHub PUT returned {status_code}: {result}")
+
+        _last_pushed_ids = ids
+        _last_pushed_time = now
+        github_status["last_push"] = utc_now()
+        github_status["last_push_success"] = True
+        github_status["last_push_error"] = None
+        github_status["last_skipped_reason"] = None
+
+        print(
+            f"[BFYP] Published catalog.json to GitHub "
+            f"({GITHUB_REPO}@{GITHUB_BRANCH}, {len(catalog['Games'])} games)",
+            flush=True
+        )
+
+    except Exception as e:
+        # Never print the token; the error text from GitHub doesn't include it
+        github_status["last_push"] = utc_now()
+        github_status["last_push_success"] = False
+        github_status["last_push_error"] = str(e)[:300]
+
+        print(f"[BFYP] GitHub publish failed: {e}", flush=True)
 
 # ============================================================
 # CRAWLER
@@ -199,6 +335,8 @@ def run_crawler():
             )
             print("=" * 60, flush=True)
 
+            publish_catalog_to_github()
+
             return True
 
         else:
@@ -246,7 +384,6 @@ def run_crawler():
     finally:
         crawler_status["running"] = False
 
-
 # ============================================================
 # BACKGROUND CRAWLER LOOP
 # ============================================================
@@ -275,7 +412,6 @@ def crawler_loop():
         )
 
         time.sleep(REFRESH_INTERVAL)
-
 
 # ============================================================
 # HTTP SERVER
@@ -391,6 +527,16 @@ class BFYPRequestHandler(BaseHTTPRequestHandler):
                         REFRESH_INTERVAL // 60
                     ),
                 },
+
+                "github": {
+                    "enabled": github_status["enabled"],
+                    "repo": GITHUB_REPO,
+                    "branch": GITHUB_BRANCH,
+                    "last_push": github_status["last_push"],
+                    "last_push_success": github_status["last_push_success"],
+                    "last_push_error": github_status["last_push_error"],
+                    "last_skipped_reason": github_status["last_skipped_reason"],
+                },
             })
             return
 
@@ -466,7 +612,6 @@ class BFYPRequestHandler(BaseHTTPRequestHandler):
             flush=True
         )
 
-
 # ============================================================
 # START SERVER
 # ============================================================
@@ -495,6 +640,12 @@ def main():
     print(
         f"[BFYP] Refresh interval: "
         f"{REFRESH_INTERVAL // 60} minutes",
+        flush=True
+    )
+
+    print(
+        f"[BFYP] GitHub publishing: "
+        f"{'on (' + GITHUB_REPO + '@' + GITHUB_BRANCH + ')' if GITHUB_TOKEN else 'off (set GITHUB_TOKEN to enable)'}",
         flush=True
     )
 
@@ -566,7 +717,6 @@ def main():
 
     finally:
         server.server_close()
-
 
 # ============================================================
 # MAIN
