@@ -3113,6 +3113,8 @@ def build_record(
 
     return {
 
+      "Upvotes": up, "Downvotes": down,
+
         "UniverseId": game["id"],
 
         "PlaceId": game.get(
