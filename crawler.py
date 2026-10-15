@@ -110,7 +110,14 @@ MAX_RESULTS_PER_SEARCH = 20
 MAX_RESULTS_PER_SORT = 50
 
 # Prevent a discovery run from becoming unnecessarily huge.
+# Seeds never count against this: only discovered / remembered games are cut.
 MAX_DISCOVERED_GAMES = 2500
+
+# Games found in earlier runs stay in the catalog this many days after they
+# were last seen in Roblox search / Explore (Roblox's results shift a little
+# every request, so without this games kept disappearing and coming back).
+# Private / deleted games still drop out at once (no info = skipped).
+KEEP_DAYS = 7
 
 
 # ======================================================================
@@ -2588,62 +2595,68 @@ def chunks(items, size):
 def recursive_find_universe_ids(value):
     """
     Recursively search discovery responses for Universe IDs.
+
+    Returns them in the order Roblox listed them (no duplicates), so
+    "[:MAX_RESULTS_PER_SEARCH]" keeps the TOP results instead of a random
+    handful (a set has no order, which made games come and go between runs).
     """
 
-    found = set()
+    found = []
+    seen = set()
 
-    if isinstance(
-        value,
-        dict
-    ):
+    def add(universe_id):
+        if universe_id not in seen:
+            seen.add(universe_id)
+            found.append(universe_id)
 
-        for key, item in value.items():
+    def walk(node):
 
-            normalized = (
-                str(key)
-                .lower()
-                .replace("-", "")
-                .replace("_", "")
-            )
+        if isinstance(
+            node,
+            dict
+        ):
 
-            if normalized == "universeid":
+            for key, item in node.items():
 
-                if isinstance(
-                    item,
-                    int
-                ):
-
-                    found.add(item)
-
-                elif (
-                    isinstance(item, str)
-                    and item.isdigit()
-                ):
-
-                    found.add(
-                        int(item)
-                    )
-
-            else:
-
-                found.update(
-                    recursive_find_universe_ids(
-                        item
-                    )
+                normalized = (
+                    str(key)
+                    .lower()
+                    .replace("-", "")
+                    .replace("_", "")
                 )
 
-    elif isinstance(
-        value,
-        list
-    ):
+                if normalized == "universeid":
 
-        for item in value:
+                    if isinstance(
+                        item,
+                        int
+                    ):
 
-            found.update(
-                recursive_find_universe_ids(
-                    item
-                )
-            )
+                        add(item)
+
+                    elif (
+                        isinstance(item, str)
+                        and item.isdigit()
+                    ):
+
+                        add(
+                            int(item)
+                        )
+
+                else:
+
+                    walk(item)
+
+        elif isinstance(
+            node,
+            list
+        ):
+
+            for item in node:
+
+                walk(item)
+
+    walk(value)
 
     return found
 
@@ -3456,6 +3469,67 @@ def apply_catalog_categories(records):
 # SEED FILE
 # ======================================================================
 
+def load_previous_seen():
+    """
+    {universeId: last seen (unix time)} from the catalog the last run saved.
+    Older catalogs have no LastSeen, so their GeneratedAt is used.
+    Returns {} when there's no usable previous catalog.
+    """
+
+    if not OUTPUT_FILE.exists():
+        return {}
+
+    try:
+        previous = json.loads(
+            OUTPUT_FILE.read_text(
+                encoding="utf-8"
+            )
+        )
+    except Exception as e:
+        print(
+            f"Couldn't read the previous catalog "
+            f"({e}); starting fresh."
+        )
+        return {}
+
+    if not isinstance(previous, dict):
+        return {}
+
+    generated_at = previous.get(
+        "GeneratedAt"
+    ) or 0
+
+    seen = {}
+
+    for record in previous.get("Games") or []:
+
+        if not isinstance(record, dict):
+            continue
+
+        universe_id = record.get(
+            "UniverseId"
+        )
+
+        if not isinstance(universe_id, int):
+            continue
+
+        last_seen = record.get(
+            "LastSeen"
+        )
+
+        seen[universe_id] = (
+            last_seen
+            if isinstance(last_seen, (int, float))
+            else generated_at
+        )
+
+    print(
+        f"Previous catalog: {len(seen)} games"
+    )
+
+    return seen
+
+
 def read_seed_ids():
 
     """
@@ -3565,6 +3639,9 @@ def main():
     # 1. Read manual seeds
     # --------------------------------------------------------------
 
+    # Games from the previous catalog and when each was last seen
+    previous_seen = load_previous_seen()
+
     seed_universe_ids, place_ids = (
         read_seed_ids()
     )
@@ -3594,6 +3671,11 @@ def main():
             universe_ids.add(
                 universe_id
             )
+
+    # Seeds (universe + resolved place IDs) are always kept
+    seed_set = set(
+        universe_ids
+    )
 
     # --------------------------------------------------------------
     # 3. Search discovery
@@ -3637,18 +3719,51 @@ def main():
     # 5. Limit catalog size for this run
     # --------------------------------------------------------------
 
-    universe_ids = list(
+    run_started = int(
+        time.time()
+    )
+
+    # Everything found this run counts as "seen now"
+    seen_this_run = set(
         universe_ids
     )
 
-    if (
-        len(universe_ids)
-        > MAX_DISCOVERED_GAMES
-    ):
+    # Games from earlier runs that were seen in the last KEEP_DAYS days
+    keep_after = run_started - KEEP_DAYS * 86400
 
-        universe_ids = universe_ids[
-            :MAX_DISCOVERED_GAMES
-        ]
+    remembered = [
+        universe_id
+        for universe_id, last_seen in sorted(
+            previous_seen.items(),
+            key=lambda pair: pair[1],
+            reverse=True  # most recently seen first
+        )
+        if last_seen >= keep_after
+        and universe_id not in seen_this_run
+    ]
+
+    print(
+        f"\nRemembered from earlier runs "
+        f"(seen in the last {KEEP_DAYS} days): "
+        f"{len(remembered)} games"
+    )
+
+    # Order = priority if the cap is reached: seeds, then this run's
+    # discoveries, then remembered games. Seeds are never cut.
+    discovered = [
+        universe_id
+        for universe_id in universe_ids
+        if universe_id not in seed_set
+    ]
+
+    others = discovered + remembered
+
+    room = max(
+        0,
+        MAX_DISCOVERED_GAMES - len(seed_set)
+    )
+
+    universe_ids = list(seed_set) + others[:room]
 
     print(
         "\n=========================================="
@@ -3731,6 +3846,16 @@ def main():
                 icons.get(
                     universe_id
                 ),
+            )
+
+            # When Roblox search / Explore (or the seed list) last showed it
+            record["LastSeen"] = (
+                run_started
+                if universe_id in seen_this_run
+                else previous_seen.get(
+                    universe_id,
+                    run_started
+                )
             )
 
             records.append(
