@@ -215,9 +215,12 @@ def publish_catalog_to_github():
 
         content = CATALOG_FILE.read_bytes()
         payload = {
+            # "[skip render]" stops Render from redeploying for this commit. Without it every
+            # catalog push restarted the server, which crawled again at once and pushed again:
+            # a crawl every ~3 minutes instead of every 30, and ~1 MB of repo growth each time.
             "message": (
                 f"Catalog update: {len(catalog['Games'])} games "
-                f"(GeneratedAt {catalog.get('GeneratedAt')})"
+                f"(GeneratedAt {catalog.get('GeneratedAt')}) [skip render]"
             ),
             "content": base64.b64encode(content).decode("ascii"),
             "branch": GITHUB_BRANCH,
