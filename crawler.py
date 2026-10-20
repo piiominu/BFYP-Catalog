@@ -104,9 +104,33 @@ SEARCH_TERMS = [
     "PvP",
     "co-op",
     "multiplayer",
+    "indie",
+    "story game",
+    "narrative",
+    "atmospheric",
+    "liminal",
+    "short horror",
+    "exploration",
+    "detective",
+    "physics",
+    "platformer",
+    "roguelike",
+    "stealth",
+    "open world",
+    "rhythm",
+    "trivia",
+    "chill",
+    "hangout",
+    "art game",
+    "music",
+    "experimental",
 ]
 
-MAX_RESULTS_PER_SEARCH = 20
+MAX_RESULTS_PER_SEARCH = 40
+
+# Quality bar: only list games players actually like (seed games are always kept)
+MIN_LIKE_RATIO = 0.85
+MIN_VOTES = 200
 MAX_RESULTS_PER_SORT = 50
 
 # Prevent a discovery run from becoming unnecessarily huge.
@@ -3847,6 +3871,14 @@ def main():
                     universe_id
                 ),
             )
+
+            # Quality gate: skip games players don't like (seeds always kept)
+            if universe_id not in seed_set and (
+                record["Upvotes"] + record["Downvotes"] < MIN_VOTES
+                or (record["RobloxLikeRatio"] or 0) < MIN_LIKE_RATIO
+            ):
+                print(f"  - {record['Name']} skipped (not liked enough)")
+                continue
 
             # When Roblox search / Explore (or the seed list) last showed it
             record["LastSeen"] = (
